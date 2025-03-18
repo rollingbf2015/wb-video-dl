@@ -1,5 +1,9 @@
-import { createHash, createPrivateKey, generateKeyPairSync, sign } from "crypto";
-import { TextEncoder } from "util";
+import * as ed from '@noble/ed25519'
+import { sha512 } from '@noble/hashes/sha512';
+import { concatBytes } from '@noble/hashes/utils';
+
+// 设置库需要的 SHA-512 函数
+ed.etc.sha512Sync = (...m) => sha512(concatBytes(...m));
 
 interface ValidationRequest {
     event_ts: string;
@@ -9,71 +13,9 @@ interface ValidationResponse {
     plain_token: string;
     signature: string;
 }
-
-async function handleValidation(req:Request, botSecret:string | undefined): Promise<Response> {
-    try {
-        // 读取请求体为文本
-        const httpBody = await req.text();
-        console.log("收到的请求体:", httpBody);
-        
-        // 检查请求体是否为空
-        if (!httpBody || httpBody.trim() === '') {
-            console.error("请求体为空");
-            return new Response(JSON.stringify({ error: "请求体为空" }), { 
-                status: 400,
-                headers: { "Content-Type": "application/json" }
-            });
-        }
-        
-        // 尝试解析JSON
-        let payload: any;
-        try {
-            payload = JSON.parse(httpBody);
-            console.log("解析后的payload:", payload);
-        } catch (e) {
-            console.error("JSON解析失败:", e);
-            return new Response(JSON.stringify({ error: "无效的JSON格式" }), { 
-                status: 400,
-                headers: { "Content-Type": "application/json" }
-            });
-        }
-        
-        // 检查payload.d是否存在
-        if (!payload.d) {
-            console.error("缺少d字段:", payload);
-            return new Response(JSON.stringify({ error: "请求缺少d字段" }), { 
-                status: 400,
-                headers: { "Content-Type": "application/json" }
-            });
-        }
-        
-        // 解析内部d字段
-        let validationPayload: ValidationRequest;
-        try {
-            // 检查data是否已经是对象
-            if (typeof payload.d === 'object') {
-                validationPayload = payload.d as ValidationRequest;
-            } else {
-                validationPayload = JSON.parse(payload.d) as ValidationRequest;
-            }
-            console.log("解析后的validationPayload:", validationPayload);
-        } catch (e) {
-            console.error("d字段解析失败:", e);
-            return new Response(JSON.stringify({ error: "无效的d字段格式" }), { 
-                status: 400,
-                headers: { "Content-Type": "application/json" }
-            });
-        }
-        
-        // 检查必要字段
-        if (!validationPayload.event_ts || !validationPayload.plain_token) {
-            console.error("缺少必要字段:", validationPayload);
-            return new Response(JSON.stringify({ error: "缺少必要字段 event_ts 或 plain_token" }), { 
-                status: 400,
-                headers: { "Content-Type": "application/json" }
-            });
-        }
-        
+//req:Request
+async function handleValidation(validationPayload:ValidationRequest, botSecret:string | undefined): Promise<Response> {
+    try { 
         // 确保botSecret不为undefined
         if (!botSecret) {
             console.error("缺少BOT_SECRET环境变量");
@@ -81,40 +23,38 @@ async function handleValidation(req:Request, botSecret:string | undefined): Prom
                 status: 500,
                 headers: { "Content-Type": "application/json" }
             });
-        }
+        } 
         
-        let seed = botSecret;
-        while (seed.length < 32) { // ed25519.SeedSize = 32
-            seed = seed.repeat(2);
-        }
-        seed = seed.slice(0, 32);
-        console.log("使用的种子:", seed, "长度:", seed.length);
+        // 设定种子为机器人密码
+        let seed = botSecret;        
+        // 将种子转换为私钥
+        // @noble/ed25519要求私钥是32字节的Uint8Array
+        const privateKeyBytes = new TextEncoder().encode(seed);
+        console.log("私钥字节:", [...privateKeyBytes], "长度:", privateKeyBytes.length);
         
-        // 使用确定性种子生成密钥对
-        // 注意：这里我们需要确保与Golang的实现完全一致
-        const keyPair = generateKeyPairSync('ed25519', { 
-            publicKeyEncoding: { type: 'spki', format: 'pem' },
-            privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-            seed: Buffer.from(seed, 'utf-8') 
-        });
-        
+        // 构建消息
         const msg = validationPayload.event_ts + validationPayload.plain_token;
-        console.log("签名的消息:", msg);
+        const msgBytes = new TextEncoder().encode(msg);
         
-        // 使用私钥对消息进行签名
-        const signature = sign(null, Buffer.from(msg, 'utf-8'), keyPair.privateKey).toString('hex');
-        console.log("生成的签名:", signature);
+        // 使用@noble/ed25519库签名
+        const signatureBytes = ed.sign(msgBytes, privateKeyBytes);
         
+        // 将签名转换为十六进制字符串
+        const signatureHex = Array.from(signatureBytes)
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('');
+        
+        console.log("生成的签名:", signatureHex);
+        
+        // 构建响应
         const rsp: ValidationResponse = {
             plain_token: validationPayload.plain_token,
-            signature: signature
+            signature: signatureHex
         };
-        const rspBody = {
-            body:rsp
-        }
+        
         console.log("生成的响应:", rsp);
         
-        return new Response(JSON.stringify(rspBody), {
+        return new Response(JSON.stringify(rsp), {
             status: 200,
             headers: { "Content-Type": "application/json" },
         });
@@ -130,4 +70,16 @@ async function handleValidation(req:Request, botSecret:string | undefined): Prom
     }
 }
 
+// 测试代码
+/* const validationPayload = {
+    event_ts: "1725442341",
+    plain_token: "Arq0D5A61EgUu4OxUvOp"
+}
+const secret = "DG5g3B4j9X2KOErG"
+const testResult = await handleValidation(validationPayload, secret)
+const target = '87befc99c42c651b3aac0278e71ada338433ae26fcb24307bdc5ad38c1adc2d01bcfcadc0842edac85e85205028a1132afe09280305f13aa6909ffc2d652c706'
+const testjson = await testResult.json()
+console.log(testjson,testjson.signature===target) */
+
 export { handleValidation }
+

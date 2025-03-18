@@ -19,3 +19,5 @@ async function getQQAccessToken(appId:string, clientSecret:string){
 
 const test = await getQQAccessToken('102730570','5rdPCzmZM9wkYMAymaOD2rgVK9zpfVLB')
 console.log(test)
+
+export { getQQAccessToken }
